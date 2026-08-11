@@ -19,7 +19,7 @@
 
 set -u
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="."
 LOG="/tmp/zeroblock-install.log"
 LOCK="/tmp/zb-install.lock"
@@ -36,9 +36,12 @@ TEMP_DNS="${ZB_TEMP_DNS:-9.9.9.11}"
 
 # xray-core требует ~29.6 МБ. Ставим, только если места заведомо хватает.
 XRAY_MIN_FREE_KB=35000
-# Минимум свободного места для чистой установки: сам ZeroBlock плюс
-# зависимости (sing-box, opera-proxy, conntrack и прочее).
-MIN_FREE_KB=4500
+# Минимум свободного места для чистой установки. Считано по Installed-Size
+# из фида (opkg проверяет именно распакованный размер):
+#   zeroblock 2.0 МБ + luci-app 1.2 МБ + conntrack и библиотеки ~0.2 МБ,
+#   плюс то, что доставит автонастройка: opera-proxy 2.1 МБ, zapret2 1.2 МБ.
+# Итого около 6.7 МБ, берём с запасом на временные файлы opkg.
+MIN_FREE_KB=8000
 # Для переустановки поверх уже стоящего ZeroBlock зависимости уже на месте,
 # нужно место только под распаковку самого пакета.
 MIN_FREE_REINSTALL_KB=1800
@@ -384,6 +387,7 @@ preflight() {
 		warn "интерфейс $LI не существует — ZeroBlock может не увидеть трафик LAN"
 	fi
 
+	check_engine
 	resolve_packages
 
 	# Переустановка поверх рабочей системы требует куда меньше места,
@@ -408,6 +412,40 @@ preflight() {
 	else
 		warn "не пингуется $TEMP_DNS — установка зависимостей может не пройти"
 	fi
+}
+
+# ZeroBlock — это менеджер конфигурации, а не сам движок. Прокси-трафик
+# гоняет sing-box, и он НЕ входит в зависимости пакета: предполагается,
+# что прошивка его уже несёт. Доставить его потом почти нереально —
+# в распакованном виде это ~28 МБ, а opkg проверяет именно распакованный
+# размер, то есть на типичный роутерный overlay он не влезет.
+check_engine() {
+	ENGINE=""
+	for e in sing-box-rr sing-box-tiny sing-box; do
+		if pkg_installed "$e"; then
+			ENGINE="$e"
+			break
+		fi
+	done
+
+	if [ -n "$ENGINE" ]; then
+		ok "движок:    $ENGINE $(pkg_version "$ENGINE")"
+		return 0
+	fi
+
+	log ""
+	log "  ${C_YEL}В системе нет sing-box — движка, который выполняет всю работу.${C_OFF}"
+	log "  ZeroBlock без него установится, но маршрутизировать не будет ничем."
+	log ""
+	log "  sing-box не входит в зависимости пакета: он должен идти в составе"
+	log "  прошивки. Доставить отдельно обычно невозможно — распакованный"
+	log "  размер около 28 МБ, а весь ваш раздел $(( $(df -k "$(pkg_root)" 2>/dev/null | tail -1 | awk '{print $2}') / 1024 )) МБ."
+	log ""
+	log "  Проверьте, есть ли он в вашем фиде:"
+	log "    ${C_DIM}opkg update && opkg install sing-box-tiny${C_OFF}"
+	log ""
+	[ "$ZB_FORCE" = "1" ] || die "нет движка sing-box. Установить всё равно: ZB_FORCE=1 sh install.sh"
+	warn "движка нет, продолжаю из-за ZB_FORCE=1 — работать не будет"
 }
 
 # Решает, откуда брать ZeroBlock: вложенный файл или фиды роутера.
