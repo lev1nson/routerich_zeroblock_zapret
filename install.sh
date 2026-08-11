@@ -19,7 +19,7 @@
 
 set -u
 
-VERSION="1.6.0"
+VERSION="1.6.1"
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="."
 LOG="/tmp/zeroblock-install.log"
 LOCK="/tmp/zb-install.lock"
@@ -1139,6 +1139,7 @@ ensure_bundled_sections() {
 		if uci show zeroblock >/dev/null 2>&1; then
 			ok "$name добавлена из комплекта${NEEDIF:+ (через $NEEDIF)}"
 			ADDED=$((ADDED + 1))
+			release_community_lists "$name" "$f"
 		else
 			warn "$name сделала конфиг невалидным — откатываю"
 			cp /tmp/zb_pre_section.conf /etc/config/zeroblock 2>/dev/null
@@ -1151,6 +1152,38 @@ ensure_bundled_sections() {
 		/etc/init.d/zeroblock start >/dev/null 2>&1
 		sleep 15
 	fi
+}
+
+# ZeroBlock запрещает одному community-списку принадлежать двум секциям:
+# при дубле он не просто ругается, а ПРЕРЫВАЕТ сборку конфига целиком.
+# Автонастройка отдаёт awg10 списки messengers и meta, а секция из комплекта
+# забирает их себе — если не разнять сразу, между добавлением секции и
+# раскладкой списков остаётся окно, в котором конфиг не собирается.
+release_community_lists() {
+	_new="$1"
+	_claim=$(awk 'BEGIN{q=sprintf("%c",39)}
+		/^[ \t]*list[ \t]+community_lists[ \t]/{ v=$3; gsub(q,"",v); print v }' "$2")
+	[ -n "$_claim" ] || return 0
+
+	for _other in $(uci show zeroblock 2>/dev/null | grep '=section$' |
+		sed 's/^zeroblock\.//; s/=section$//'); do
+		[ "$_other" = "$_new" ] && continue
+		_cur=$(uget "zeroblock.$_other.community_lists")
+		[ -n "$_cur" ] || continue
+
+		_keep=""; _moved=""
+		for _c in $_cur; do
+			_dup=0
+			for _n in $_claim; do [ "$_c" = "$_n" ] && _dup=1; done
+			if [ "$_dup" = "1" ]; then _moved="$_moved $_c"; else _keep="$_keep $_c"; fi
+		done
+
+		if [ -n "$_moved" ]; then
+			udel "zeroblock.$_other.community_lists"
+			for _c in $_keep; do uci add_list "zeroblock.$_other.community_lists=$_c"; done
+			info "$_other: списки$_moved переданы секции $_new"
+		fi
+	done
 }
 
 # ------------------------------------------------------------------ ШАГ 8 --

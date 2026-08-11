@@ -164,12 +164,21 @@ sh uninstall.sh full    # полный: sysupgrade -r из последнего 
     └── build-lists.py            пересборка списков из src/
 ```
 
+### Откуда списки
+
+Три разных источника, их важно не путать:
+
+1. **Community-списки ZeroBlock** — приходят с сервера RouteRich и обновляются сами. `youtube`, `discord`, `meta`, `messengers`, `torrent`, `ai`, `tools` и прочие. Скрипт только раскладывает их по секциям.
+2. **Списки из этого репозитория** — `lists/*.lst`, собраны из выгрузок [iplist.my-handbook.ru](https://iplist.my-handbook.ru/ru) (зарубежные ресурсы) и [ru-iplist.my-handbook.ru](https://ru-iplist.my-handbook.ru/ru) (российские). Формат podkop/getIPList. **Статичны, сами не обновляются.**
+3. **Исключения** — из того же ru-iplist: банки, госуслуги, налоговая, Яндекс. Идут напрямую мимо прокси.
+
+Исходные JSON лежат в `lists/src/`, готовые списки — обычный текст, открываются и читаются глазами.
+
 ### Пересборка списков
 
-Списки статичны и сами не обновляются, в отличие от community-списков ZeroBlock:
+Скачайте свежие выгрузки с сайтов выше в `lists/src/` и пересоберите:
 
 ```sh
-# положить свежие JSON в lists/src/, затем
 python3 tools/build-lists.py
 ```
 
