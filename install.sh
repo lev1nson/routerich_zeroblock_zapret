@@ -19,7 +19,7 @@
 
 set -u
 
-VERSION="1.2.1"
+VERSION="1.2.2"
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="."
 LOG="/tmp/zeroblock-install.log"
 LOCK="/tmp/zb-install.lock"
@@ -745,10 +745,15 @@ write_config() {
 		[ "$N" -gt 0 ] && info "сохранено секций маршрутизации: $N"
 	fi
 
-	# Только собственные временные артефакты. Файлы самого пакета не трогаем:
-	# на части сборок busybox find не умеет -exec {} +, и «чистка» либо
-	# молча не работает, либо сносит только что установленное.
-	rm -f /etc/zeroblock/*.tmp /etc/zeroblock/*.bak /etc/zeroblock/*.old 2>/dev/null
+	# Сбрасываем runtime-состояние демона: state.json, .daemon_init,
+	# .auto_component_ownership_v1. Без этого ZeroBlock считает, что
+	# автонастройку уже проводил, и не создаёт секции заново.
+	# Удаляем только файлы верхнего уровня — всё, что принадлежит пакету,
+	# лежит в подкаталогах (defaults/, sing-box.d/), туда не лезем.
+	# find -exec {} + на части сборок busybox не работает, поэтому глобом.
+	for f in /etc/zeroblock/* /etc/zeroblock/.[!.]*; do
+		[ -f "$f" ] && rm -f "$f"
+	done
 	rm -f /etc/config/zeroblock
 
 	FREE=$(free_kb)
@@ -904,10 +909,18 @@ wait_autoconfig() {
 	done
 
 	if [ "$READY" = "0" ]; then
-		AUTOCONFIG_FAILED=1
 		warn "секции не появились за $ZB_AUTOCONFIG_WAIT сек"
-		warn "проверьте интернет и логи: logread -e zeroblock"
 		restore_missing_sections
+
+		# Секции могли вернуться из сохранённой копии — тогда всё в порядке,
+		# и пугать пользователя нечем.
+		if [ "$(num "$(count_sections)" 0)" -ge 2 ]; then
+			ok "секции взяты из бэкапа: $(count_sections) — рабочая конфигурация восстановлена"
+			return 0
+		fi
+
+		AUTOCONFIG_FAILED=1
+		warn "и восстановить из бэкапа нечего — проверьте логи: logread -e zeroblock"
 		return 0
 	fi
 
@@ -1223,6 +1236,9 @@ verify() {
 summary() {
 	BD=$(cat /tmp/zb_backup_dir 2>/dev/null || echo "")
 	log ""
+	# Итог считаем по фактическому состоянию, а не по промежуточным флагам.
+	[ "$(num "$(count_sections)" 0)" -ge 2 ] && AUTOCONFIG_FAILED=0
+
 	log "${C_CYN}────────────────────────────────────────────────${C_OFF}"
 	if [ "$AUTOCONFIG_FAILED" = "1" ]; then
 		log "${C_RED}  ZeroBlock не настроился: секции маршрутизации не созданы.${C_OFF}"
