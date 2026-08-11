@@ -3,10 +3,11 @@
 # Откат установки ZeroBlock + Zapret2
 #
 #   sh uninstall.sh              — мягкий откат: выключить ZeroBlock,
-#                                  вернуть podkop, оставить пакеты на месте
+#                                  вернуть прежние схемы и DNS
 #   sh uninstall.sh full         — полный откат из последнего бэкапа
 #   sh uninstall.sh full <файл>  — полный откат из указанного бэкапа
 #   sh uninstall.sh list         — показать доступные бэкапы
+#   sh uninstall.sh purge        — мягкий откат + удаление пакетов ZeroBlock
 #
 # Полный откат делает sysupgrade -r и требует перезагрузки: он вернёт ВСЕ
 # настройки роутера на момент бэкапа, не только то, что касается ZeroBlock.
@@ -33,22 +34,29 @@ die()  { printf "%b\n" "  ${C_RED}✗ $*${C_OFF}"; exit 1; }
 
 [ "$(id -u)" = "0" ] || die "нужны права root"
 
+if command -v apk >/dev/null 2>&1 && apk --version >/dev/null 2>&1; then
+	PKGM="apk"; PKG_RM="apk del"
+else
+	PKGM="opkg"; PKG_RM="opkg remove"
+fi
+
+# Все каталоги бэкапов, свежие первыми.
+backup_dirs() { ls -1d "$BACKUP_ROOT"/*/ 2>/dev/null | sort -r; }
+
 find_backups() {
-	find "$BACKUP_ROOT" -name "sysupgrade-config.tar.gz" -type f 2>/dev/null | sort -r
+	backup_dirs | while IFS= read -r d; do
+		[ -f "$d/sysupgrade-config.tar.gz" ] && echo "$d/sysupgrade-config.tar.gz"
+	done
 }
 
-case "$MODE" in
-
-list)
-	step "Доступные бэкапы в $BACKUP_ROOT"
-	FOUND=$(find_backups)
-	[ -n "$FOUND" ] || die "бэкапов не найдено"
-	echo "$FOUND" | while IFS= read -r b; do
-		printf "  %s  %s\n" "$(ls -lh "$b" | awk '{print $5}')" "$b"
+# Самый свежий файл с указанным именем среди бэкапов.
+latest_file() {
+	backup_dirs | while IFS= read -r d; do
+		[ -f "$d/$1" ] && { echo "$d/$1"; break; }
 	done
-	;;
+}
 
-soft)
+soft_rollback() {
 	step "Мягкий откат"
 
 	for svc in zeroblock zapret2; do
@@ -59,21 +67,15 @@ soft)
 		fi
 	done
 
-	RESTORED=0
-	for f in "$BACKUP_ROOT"/*/dhcp.bak "$BACKUP_ROOT"/*/etc-config.tar.gz; do
-		[ -e "$f" ] || continue
-		case "$f" in
-			*dhcp.bak)
-				cp "$f" /etc/config/dhcp && RESTORED=1 && ok "конфиг dnsmasq восстановлен из $f"
-				break
-				;;
-		esac
-	done
-	if [ "$RESTORED" = "0" ]; then
-		LATEST=$(find "$BACKUP_ROOT" -name "etc-config.tar.gz" -type f 2>/dev/null | sort -r | head -1)
-		if [ -n "$LATEST" ]; then
-			tar xzf "$LATEST" -C / etc/config/dhcp 2>/dev/null &&
-				ok "конфиг dnsmasq восстановлен из $LATEST" ||
+	# DNS: берём самый СВЕЖИЙ бэкап, а не первый попавшийся.
+	DHCP=$(latest_file dhcp.bak)
+	if [ -n "$DHCP" ]; then
+		cp "$DHCP" /etc/config/dhcp && ok "конфиг dnsmasq восстановлен из $DHCP"
+	else
+		ETC=$(latest_file etc-config.tar.gz)
+		if [ -n "$ETC" ]; then
+			tar xzf "$ETC" -C / etc/config/dhcp 2>/dev/null &&
+				ok "конфиг dnsmasq восстановлен из $ETC" ||
 				warn "не удалось восстановить dnsmasq, поправьте вручную"
 		else
 			warn "бэкап dnsmasq не найден — DNS останется как есть"
@@ -81,25 +83,78 @@ soft)
 	fi
 	/etc/init.d/dnsmasq restart >/dev/null 2>&1
 
-	if [ -f /etc/init.d/podkop ]; then
-		/etc/init.d/podkop enable >/dev/null 2>&1
-		/etc/init.d/podkop start  >/dev/null 2>&1
-		ok "podkop включён обратно"
-	else
-		info "podkop не установлен, включать нечего"
+	# Возвращаем ровно те службы, которые выключал install.sh.
+	SVCLIST=$(latest_file disabled-services.txt)
+	RESTORED=0
+	if [ -n "$SVCLIST" ]; then
+		while IFS= read -r svc || [ -n "$svc" ]; do
+			[ -n "$svc" ] || continue
+			[ -f "/etc/init.d/$svc" ] || continue
+			"/etc/init.d/$svc" enable >/dev/null 2>&1
+			"/etc/init.d/$svc" start  >/dev/null 2>&1
+			ok "$svc включён обратно"
+			RESTORED=$((RESTORED + 1))
+		done <"$SVCLIST"
 	fi
 
+	if [ "$RESTORED" = "0" ]; then
+		if [ -f /etc/init.d/podkop ]; then
+			/etc/init.d/podkop enable >/dev/null 2>&1
+			/etc/init.d/podkop start  >/dev/null 2>&1
+			ok "podkop включён обратно"
+		else
+			info "список выключённых служб не найден и podkop не установлен"
+			info "если у вас был passwall / openclash / xkeen — включите вручную"
+		fi
+	fi
+}
+
+case "$MODE" in
+
+list)
+	step "Доступные бэкапы в $BACKUP_ROOT"
+	FOUND=$(backup_dirs)
+	[ -n "$FOUND" ] || die "бэкапов не найдено"
+	echo "$FOUND" | while IFS= read -r d; do
+		if [ -f "$d/sysupgrade-config.tar.gz" ]; then
+			printf "  %-8s %s\n" "$(ls -lh "$d/sysupgrade-config.tar.gz" | awk '{print $5}')" "$d"
+		else
+			printf "  %-8s %s %s\n" "—" "$d" "${C_YEL}(без sysupgrade-архива)${C_OFF}"
+		fi
+	done
+	;;
+
+soft)
+	soft_rollback
 	log ""
 	ok "Готово. Пакеты ZeroBlock и Zapret2 остались в системе, но выключены."
-	info "Удалить полностью:  opkg remove luci-app-zeroblock zeroblock"
+	info "Удалить полностью:  sh uninstall.sh purge"
 	info "Полный откат:       sh uninstall.sh full"
+	;;
+
+purge)
+	soft_rollback
+	step "Удаление пакетов"
+	$PKG_RM luci-app-zeroblock zeroblock-tg zeroblock >/dev/null 2>&1 &&
+		ok "пакеты ZeroBlock удалены ($PKGM)" ||
+		warn "не удалось удалить пакеты, попробуйте вручную: $PKG_RM zeroblock"
+	rm -rf /etc/zeroblock /etc/config/zeroblock 2>/dev/null
+	ok "конфиги и списки удалены"
+	info "zapret2 оставлен — он может использоваться сам по себе"
 	;;
 
 full)
 	BACKUP="${2:-}"
 	if [ -z "$BACKUP" ]; then
 		BACKUP=$(find_backups | head -1)
-		[ -n "$BACKUP" ] || die "бэкапов не найдено в $BACKUP_ROOT"
+		if [ -z "$BACKUP" ]; then
+			ALT=$(latest_file etc-full.tar.gz)
+			[ -n "$ALT" ] && {
+				warn "sysupgrade-архива нет, но есть $ALT"
+				warn "распакуйте вручную: tar xzf $ALT -C / && reboot"
+			}
+			die "полных бэкапов не найдено в $BACKUP_ROOT"
+		fi
 		info "выбран последний: $BACKUP"
 	fi
 	[ -f "$BACKUP" ] || die "файл не найден: $BACKUP"
@@ -118,7 +173,7 @@ full)
 	;;
 
 *)
-	die "неизвестный режим: $MODE (доступны: soft, full, list)"
+	die "неизвестный режим: $MODE (доступны: soft, full, purge, list)"
 	;;
 
 esac
