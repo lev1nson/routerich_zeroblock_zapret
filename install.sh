@@ -19,7 +19,7 @@
 
 set -u
 
-VERSION="1.7.0"
+VERSION="1.7.1"
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="."
 LOG="/tmp/zeroblock-install.log"
 LOCK="/tmp/zb-install.lock"
@@ -1250,16 +1250,18 @@ install_lists() {
 			continue
 		fi
 
-		# Файл кладём в любом случае: он же служит запасом, если удалённый
-		# список окажется недоступен.
 		tr -d '\r' <"$SRC" >"$LIST_DIR/zb-$sec.lst"
 		udel "zeroblock.$sec.user_lists"
 
+		# Локальный файл подключаем всегда — он работает без сети и служит
+		# основой, если удалённый список окажется недоступен. В remote-режиме
+		# рядом добавляется URL, ZeroBlock объединяет оба.
+		uci add_list "zeroblock.$sec.user_lists=$LIST_DIR/zb-$sec.lst"
+
 		if [ "$ZB_REMOTE_LISTS" = "1" ]; then
 			uci add_list "zeroblock.$sec.user_lists=$LISTS_BASE_URL/zb-$sec.lst"
-			ok "$sec: $LISTS_BASE_URL/zb-$sec.lst"
+			ok "$sec: $(wc -l <"$LIST_DIR/zb-$sec.lst") строк + обновление по URL"
 		else
-			uci add_list "zeroblock.$sec.user_lists=$LIST_DIR/zb-$sec.lst"
 			ok "$sec: $(wc -l <"$LIST_DIR/zb-$sec.lst") строк"
 		fi
 
