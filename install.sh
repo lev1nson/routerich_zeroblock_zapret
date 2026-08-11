@@ -19,7 +19,7 @@
 
 set -u
 
-VERSION="1.7.1"
+VERSION="1.8.0"
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="."
 LOG="/tmp/zeroblock-install.log"
 LOCK="/tmp/zb-install.lock"
@@ -122,6 +122,7 @@ ZB_REMOVE_PODKOP=$(flag "${ZB_REMOVE_PODKOP:-0}")
 ZB_PREFER_REPO=$(flag "${ZB_PREFER_REPO:-0}")
 ZB_REINSTALL=$(flag "${ZB_REINSTALL:-0}")
 ZB_REMOTE_LISTS=$(flag "${ZB_REMOTE_LISTS:-0}")
+ZB_CRON_UPDATE=$(flag "${ZB_CRON_UPDATE:-0}")
 ZB_FORCE=$(flag "${ZB_FORCE:-0}")
 ZB_AUTOCONFIG_WAIT=$(num "${ZB_AUTOCONFIG_WAIT:-300}" 300)
 
@@ -1319,6 +1320,27 @@ install_excludes() {
 	uci commit zeroblock
 }
 
+# ---------------------------------------------------------- ШАГ 9-бис --
+# Еженедельное обновление списков прямо с роутера.
+
+setup_auto_update() {
+	[ "$ZB_CRON_UPDATE" = "1" ] || return 0
+
+	step "Автообновление списков"
+
+	UPD="$SCRIPT_DIR/tools/update-lists-router.sh"
+	if [ ! -f "$UPD" ]; then
+		warn "tools/update-lists-router.sh не найден"
+		return 0
+	fi
+
+	if sh "$UPD" --install; then
+		info "списки будут обновляться из iplist напрямую, минуя репозиторий"
+	else
+		warn "не удалось настроить расписание"
+	fi
+}
+
 # ----------------------------------------------------------------- ШАГ 10 --
 
 setup_zapret2() {
@@ -1541,6 +1563,7 @@ ensure_bundled_sections
 assign_community_lists
 install_lists
 install_excludes
+setup_auto_update
 setup_zapret2
 dns_temp_off
 apply_and_refresh
