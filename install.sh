@@ -19,7 +19,7 @@
 
 set -u
 
-VERSION="1.2.2"
+VERSION="1.3.0"
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="."
 LOG="/tmp/zeroblock-install.log"
 LOCK="/tmp/zb-install.lock"
@@ -76,6 +76,7 @@ WARN_COUNT=0
 AUTOCONFIG_FAILED=0
 DNS_SWAPPED=0
 PKG_UPDATED=0
+LUCI_MISSING=0
 
 log()  { printf "%b\n" "$*" | tee -a "$LOG"; }
 step() { printf "\n%b\n" "${C_CYN}==> $*${C_OFF}" | tee -a "$LOG"; }
@@ -109,6 +110,7 @@ ZB_KEEP_CONFIG=$(flag "${ZB_KEEP_CONFIG:-0}")
 ZB_INSTALL_TG=$(flag "${ZB_INSTALL_TG:-0}")
 ZB_REMOVE_PODKOP=$(flag "${ZB_REMOVE_PODKOP:-0}")
 ZB_PREFER_REPO=$(flag "${ZB_PREFER_REPO:-0}")
+ZB_REINSTALL=$(flag "${ZB_REINSTALL:-0}")
 ZB_FORCE=$(flag "${ZB_FORCE:-0}")
 ZB_AUTOCONFIG_WAIT=$(num "${ZB_AUTOCONFIG_WAIT:-300}" 300)
 
@@ -225,13 +227,34 @@ pkg_install_repo() {
 	fi
 }
 
-# --force-reinstall: иначе opkg на совпадающей версии молча ничего не делает,
-# а мы обещали переустановку.
+# Обычная установка: на совпадающей версии opkg ничего не делает и места
+# не требует, на более новой — обновляет.
 pkg_install_file() {
 	if [ "$PKGM" = "apk" ]; then
 		apk add --allow-untrusted "$1" >>"$LOG" 2>&1
 	else
-		opkg install --force-reinstall "$1" >>"$LOG" 2>&1 || opkg install "$1" >>"$LOG" 2>&1
+		opkg install "$1" >>"$LOG" 2>&1
+	fi
+}
+
+# Принудительная переустановка. ОПАСНА на тесном диске: opkg сначала удаляет
+# пакет и только потом проверяет место под установку обратно — при нехватке
+# вы остаётесь без рабочего пакета. Поэтому только по явному запросу
+# и с предварительной проверкой места.
+pkg_reinstall_file() {
+	_f="$1"
+	_sz=$(num "$(du -k "$_f" 2>/dev/null | cut -f1)" 0)
+	_need=$((_sz * 5))
+	_free=$(free_kb)
+	if [ "$_free" -lt "$_need" ] && [ "$ZB_FORCE" != "1" ]; then
+		warn "переустановка $(basename "$_f") пропущена: свободно $((_free / 1024)) МБ, нужно около $((_need / 1024)) МБ"
+		warn "иначе пакет был бы удалён и не восстановлен"
+		return 1
+	fi
+	if [ "$PKGM" = "apk" ]; then
+		apk add --allow-untrusted "$_f" >>"$LOG" 2>&1
+	else
+		opkg install --force-reinstall "$_f" >>"$LOG" 2>&1
 	fi
 }
 
@@ -531,14 +554,30 @@ install_packages() {
 	pkg_update || warn "не удалось обновить индекс пакетов — зависимости могут не установиться"
 
 	CUR=$(pkg_version zeroblock)
-	[ -n "$CUR" ] && info "уже установлен zeroblock $CUR, переустанавливаю"
+	if [ -n "$CUR" ]; then
+		if [ "$ZB_REINSTALL" = "1" ]; then
+			info "уже установлен zeroblock $CUR, переустанавливаю принудительно"
+		else
+			info "уже установлен zeroblock $CUR (обновится, если в пакете версия новее)"
+		fi
+	fi
+
+	# Запоминаем, что было до нас: если пакет пропадёт, это надо заметить.
+	HAD_LUCI=0; pkg_installed luci-app-zeroblock && HAD_LUCI=1
 
 	if [ "$SOURCE" = "file" ]; then
-		pkg_install_file "$ZB_IPK" || { tail -20 "$LOG"; die "не удалось установить zeroblock (подробности в $LOG)"; }
-		ok "zeroblock: $(basename "$ZB_IPK")"
+		if [ "$ZB_REINSTALL" = "1" ] && [ -n "$CUR" ]; then
+			pkg_reinstall_file "$ZB_IPK" || pkg_install_file "$ZB_IPK"
+		else
+			pkg_install_file "$ZB_IPK" || { tail -20 "$LOG"; die "не удалось установить zeroblock (подробности в $LOG)"; }
+		fi
+		ok "zeroblock: $(pkg_version zeroblock)"
 
-		pkg_install_file "$LUCI_IPK" && ok "luci-app-zeroblock установлен" ||
-			warn "luci-app-zeroblock не установился, веб-интерфейса не будет"
+		if [ "$ZB_REINSTALL" = "1" ] && [ "$HAD_LUCI" = "1" ]; then
+			pkg_reinstall_file "$LUCI_IPK" || pkg_install_file "$LUCI_IPK"
+		else
+			pkg_install_file "$LUCI_IPK"
+		fi
 
 		if [ "$ZB_INSTALL_TG" = "1" ] && [ -n "$TG_IPK" ]; then
 			pkg_install_file "$TG_IPK" && ok "zeroblock-tg (уведомления в Telegram)" ||
@@ -548,8 +587,7 @@ install_packages() {
 		pkg_install_repo zeroblock || { tail -20 "$LOG"; die "не удалось установить zeroblock из репозитория"; }
 		ok "zeroblock: $(pkg_version zeroblock)"
 
-		pkg_install_repo luci-app-zeroblock && ok "luci-app-zeroblock установлен" ||
-			warn "luci-app-zeroblock не установился, веб-интерфейса не будет"
+		pkg_install_repo luci-app-zeroblock
 
 		if [ "$ZB_INSTALL_TG" = "1" ]; then
 			pkg_install_repo zeroblock-tg && ok "zeroblock-tg (уведомления в Telegram)" ||
@@ -559,6 +597,19 @@ install_packages() {
 
 	pkg_installed zeroblock || die "zeroblock не появился в списке установленных"
 	[ -f /etc/init.d/zeroblock ] || die "нет /etc/init.d/zeroblock — установка прошла криво"
+
+	# Веб-интерфейс — не мелочь: без него настраивать нечем.
+	if pkg_installed luci-app-zeroblock; then
+		ok "luci-app-zeroblock: $(pkg_version luci-app-zeroblock)"
+	else
+		LUCI_MISSING=1
+		if [ "$HAD_LUCI" = "1" ]; then
+			warn "luci-app-zeroblock БЫЛ установлен, но пропал — не хватило места при распаковке"
+		else
+			warn "luci-app-zeroblock не установился — веб-интерфейса не будет"
+		fi
+		warn "освободите место и поставьте вручную (команда будет в конце)"
+	fi
 
 	# postinst мог поднять службу рядом с ещё живой старой схемой.
 	/etc/init.d/zeroblock stop >/dev/null 2>&1
@@ -1250,9 +1301,21 @@ summary() {
 	fi
 	log "${C_CYN}────────────────────────────────────────────────${C_OFF}"
 	log ""
-	log "  Веб-интерфейс:  Службы → ZeroBlock"
-	log "  ${C_DIM}Если пункта нет — обновите страницу, перелогиньтесь"
-	log "  или откройте админку в инкогнито-окне.${C_OFF}"
+	if [ "$LUCI_MISSING" = "1" ]; then
+		log "  ${C_YEL}Веб-интерфейс не установлен — не хватило места.${C_OFF}"
+		log "  Освободите место и поставьте вручную:"
+		if [ "$SOURCE" = "file" ] && [ -n "${LUCI_IPK:-}" ]; then
+			log "    ${C_DIM}opkg install $LUCI_IPK${C_OFF}"
+		else
+			log "    ${C_DIM}opkg install luci-app-zeroblock${C_OFF}"
+		fi
+		log "  ${C_DIM}Само проксирование при этом работает — интерфейс нужен"
+		log "  только для настройки через браузер.${C_OFF}"
+	else
+		log "  Веб-интерфейс:  Службы → ZeroBlock"
+		log "  ${C_DIM}Если пункта нет — обновите страницу, перелогиньтесь"
+		log "  или откройте админку в инкогнито-окне.${C_OFF}"
+	fi
 	log ""
 	log "  Лог установки:  $LOG"
 
