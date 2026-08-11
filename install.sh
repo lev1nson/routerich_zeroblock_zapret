@@ -19,7 +19,7 @@
 
 set -u
 
-VERSION="1.5.0"
+VERSION="1.6.0"
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="."
 LOG="/tmp/zeroblock-install.log"
 LOCK="/tmp/zb-install.lock"
@@ -36,15 +36,16 @@ TEMP_DNS="${ZB_TEMP_DNS:-9.9.9.11}"
 
 # xray-core требует ~29.6 МБ. Ставим, только если места заведомо хватает.
 XRAY_MIN_FREE_KB=35000
-# Минимум свободного места для чистой установки. Считано по Installed-Size
-# из фида (opkg проверяет именно распакованный размер):
-#   zeroblock 2.0 МБ + luci-app 1.2 МБ + conntrack и библиотеки ~0.2 МБ,
-#   плюс то, что доставит автонастройка: opera-proxy 2.1 МБ, zapret2 1.2 МБ.
-# Итого около 6.7 МБ, берём с запасом на временные файлы opkg.
-MIN_FREE_KB=8000
-# Для переустановки поверх уже стоящего ZeroBlock зависимости уже на месте,
-# нужно место только под распаковку самого пакета.
-MIN_FREE_REINSTALL_KB=1800
+# Сколько места занимают компоненты в РАСПАКОВАННОМ виде — именно этот
+# размер проверяет opkg. Цифры из Installed-Size в фиде RouteRich.
+# Плоского порога тут быть не может: на одном роутере не хватает всего,
+# на другом половина уже стоит.
+SZ_ZEROBLOCK=2030
+SZ_LUCI=1180
+SZ_OPERA=2100
+SZ_ZAPRET2=1220
+SZ_DEPS=200      # conntrack и библиотеки
+SZ_SLACK=1000    # временные файлы opkg
 
 # Службы старых схем обхода блокировок: останавливаем и убираем из автозапуска.
 # Все они так или иначе лезут в nftables и маршрутизацию и конфликтуют
@@ -293,6 +294,18 @@ free_kb() {
 
 free_mb() { echo $(( $(free_kb) / 1024 )); }
 
+# Сколько места реально понадобится: суммируем только то, чего ещё нет.
+# opera-proxy и zapret2 доставляет автонастройка уже после того, как старые
+# схемы выключены, — если их не учесть, установка умрёт на полпути.
+needed_kb() {
+	_n="$SZ_SLACK"
+	pkg_installed zeroblock          || _n=$((_n + SZ_ZEROBLOCK + SZ_DEPS))
+	pkg_installed luci-app-zeroblock || _n=$((_n + SZ_LUCI))
+	pkg_installed opera-proxy        || _n=$((_n + SZ_OPERA))
+	pkg_installed zapret2            || _n=$((_n + SZ_ZAPRET2))
+	echo "$_n"
+}
+
 detect_board() {
 	MODEL=$(cat /tmp/sysinfo/model 2>/dev/null)
 	[ -n "$MODEL" ] || MODEL=$(tr -d '\000' </proc/device-tree/model 2>/dev/null)
@@ -390,15 +403,9 @@ preflight() {
 	check_engine
 	resolve_packages
 
-	# Переустановка поверх рабочей системы требует куда меньше места,
-	# чем первая установка со всеми зависимостями.
-	if pkg_installed zeroblock; then
-		NEED_KB="$MIN_FREE_REINSTALL_KB"
-		info "ZeroBlock уже установлен — режим переустановки"
-	else
-		NEED_KB="$MIN_FREE_KB"
-	fi
+	pkg_installed zeroblock && info "ZeroBlock уже установлен — режим переустановки"
 
+	NEED_KB=$(needed_kb)
 	FREE=$(free_kb)
 	info "свободно:  $((FREE / 1024)) МБ на $(pkg_root), нужно $((NEED_KB / 1024)) МБ"
 	if [ "$FREE" -lt "$NEED_KB" ]; then
