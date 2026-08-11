@@ -19,7 +19,7 @@
 
 set -u
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="."
 LOG="/tmp/zeroblock-install.log"
 LOCK="/tmp/zb-install.lock"
@@ -36,8 +36,12 @@ TEMP_DNS="${ZB_TEMP_DNS:-9.9.9.11}"
 
 # xray-core требует ~29.6 МБ. Ставим, только если места заведомо хватает.
 XRAY_MIN_FREE_KB=35000
-# Минимум свободного места для самой установки ZeroBlock.
+# Минимум свободного места для чистой установки: сам ZeroBlock плюс
+# зависимости (sing-box, opera-proxy, conntrack и прочее).
 MIN_FREE_KB=4500
+# Для переустановки поверх уже стоящего ZeroBlock зависимости уже на месте,
+# нужно место только под распаковку самого пакета.
+MIN_FREE_REINSTALL_KB=1800
 
 # Службы старых схем обхода блокировок: останавливаем и убираем из автозапуска.
 # Все они так или иначе лезут в nftables и маршрутизацию и конфликтуют
@@ -359,11 +363,20 @@ preflight() {
 
 	resolve_packages
 
+	# Переустановка поверх рабочей системы требует куда меньше места,
+	# чем первая установка со всеми зависимостями.
+	if pkg_installed zeroblock; then
+		NEED_KB="$MIN_FREE_REINSTALL_KB"
+		info "ZeroBlock уже установлен — режим переустановки"
+	else
+		NEED_KB="$MIN_FREE_KB"
+	fi
+
 	FREE=$(free_kb)
-	info "свободно:  $((FREE / 1024)) МБ на $(pkg_root)"
-	if [ "$FREE" -lt "$MIN_FREE_KB" ]; then
+	info "свободно:  $((FREE / 1024)) МБ на $(pkg_root), нужно $((NEED_KB / 1024)) МБ"
+	if [ "$FREE" -lt "$NEED_KB" ]; then
 		[ "$ZB_FORCE" = "1" ] ||
-			die "мало места: нужно минимум $((MIN_FREE_KB / 1024)) МБ. Всё равно: ZB_FORCE=1 sh install.sh"
+			die "мало места: нужно минимум $((NEED_KB / 1024)) МБ. Всё равно: ZB_FORCE=1 sh install.sh"
 		warn "мало места, продолжаю из-за ZB_FORCE=1"
 	fi
 
@@ -434,6 +447,10 @@ do_backup() {
 		0|1[0-9][0-9][0-9]) warn "часы роутера не синхронизированы ($Y) — имя каталога бэкапа будет странным" ;;
 	esac
 
+	# Ротация ДО создания нового бэкапа: старые архивы лежат на том же
+	# разделе, куда мы сейчас будем ставить пакеты.
+	rotate_backups "$((BACKUP_KEEP - 1))"
+
 	OLDMASK=$(umask)
 	umask 077
 	BACKUP_DIR="$BACKUP_ROOT/$(date +%Y-%m-%d_%H-%M-%S)-$$"
@@ -478,21 +495,32 @@ do_backup() {
 	ok "бэкап: $BACKUP_DIR"
 	echo "$BACKUP_DIR" >/tmp/zb_backup_dir
 
-	# Старые бэкапы съедают тот же overlay, на который мы ставим пакеты.
-	COUNT=$(ls -1d "$BACKUP_ROOT"/*/ 2>/dev/null | wc -l)
-	if [ "$(num "$COUNT" 0)" -gt "$BACKUP_KEEP" ]; then
-		ls -1d "$BACKUP_ROOT"/*/ 2>/dev/null | sort | head -n "$((COUNT - BACKUP_KEEP))" |
-			while IFS= read -r d; do rm -rf "$d"; done
-		info "старых бэкапов удалено: $((COUNT - BACKUP_KEEP)) (оставлено $BACKUP_KEEP)"
-	fi
-
 	# Проверка места ДО бэкапа уже пройдена, но сам бэкап занял место.
 	FREE=$(free_kb)
-	if [ "$FREE" -lt "$MIN_FREE_KB" ]; then
-		warn "после бэкапа осталось $((FREE / 1024)) МБ"
-		[ "$ZB_FORCE" = "1" ] ||
-			die "места не хватит на установку. Удалите старые бэкапы из $BACKUP_ROOT или запустите с ZB_BACKUP_DIR=/tmp/zb-backup"
+	if [ "$FREE" -lt "$NEED_KB" ]; then
+		warn "после бэкапа осталось $((FREE / 1024)) МБ, нужно $((NEED_KB / 1024)) МБ"
+		log ""
+		log "  Что занимает место (крупнейшее в /root):"
+		du -sk "$BACKUP_ROOT" /root/* 2>/dev/null | sort -rn | head -5 |
+			awk '{printf "    %6.1f МБ  %s\n", $1/1024, $2}' | tee -a "$LOG"
+		log ""
+		log "  Варианты:"
+		log "    ${C_DIM}rm -rf $BACKUP_ROOT${C_OFF}                 удалить бэкапы этого скрипта"
+		log "    ${C_DIM}ZB_BACKUP_DIR=/tmp/zb-backup sh install.sh${C_OFF}  бэкап в /tmp (не переживёт ребут)"
+		log "    ${C_DIM}ZB_FORCE=1 sh install.sh${C_OFF}                    рискнуть"
+		log ""
+		[ "$ZB_FORCE" = "1" ] || die "места не хватит на установку"
 	fi
+}
+
+# Оставляет не более $1 каталогов бэкапов, удаляя самые старые.
+rotate_backups() {
+	KEEP=$(num "${1:-2}" 2)
+	COUNT=$(num "$(ls -1d "$BACKUP_ROOT"/*/ 2>/dev/null | wc -l)" 0)
+	[ "$COUNT" -gt "$KEEP" ] || return 0
+	ls -1d "$BACKUP_ROOT"/*/ 2>/dev/null | sort | head -n "$((COUNT - KEEP))" |
+		while IFS= read -r d; do rm -rf "$d"; done
+	info "старых бэкапов удалено: $((COUNT - KEEP)), оставлено $KEEP"
 }
 
 # ------------------------------------------------------------------ ШАГ 3 --
