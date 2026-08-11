@@ -19,7 +19,7 @@
 
 set -u
 
-VERSION="1.4.0"
+VERSION="1.5.0"
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="."
 LOG="/tmp/zeroblock-install.log"
 LOCK="/tmp/zb-install.lock"
@@ -760,6 +760,7 @@ dns_temp_off() {
 	SRV=$(awk '/list[ \t]+server/{print $3}' "$DHCP_BAK" | tr -d "'\"")
 
 	DROPPED=0
+	DROPLIST=""
 	udel "dhcp.@dnsmasq[0].server"
 	if [ -n "$OLDRESOLV" ]; then
 		uci set "dhcp.@dnsmasq[0].noresolv=$OLDRESOLV"
@@ -777,7 +778,11 @@ dns_temp_off() {
 				/*/127.0.0.1*)
 					case "$s" in
 						*"#$ZB_DNS_PORT") ;;
-						*) DROPPED=$((DROPPED + 1)); continue ;;
+						*)
+							DROPPED=$((DROPPED + 1))
+							DROPLIST="$DROPLIST $s"
+							continue
+							;;
 					esac
 					;;
 			esac
@@ -786,7 +791,15 @@ dns_temp_off() {
 	done
 
 	if [ "$DROPPED" -gt 0 ]; then
-		ok "убрано $DROPPED доменных переопределений от старой схемы"
+		ok "убрано $DROPPED доменных переопределений — теперь эти домены идут через ZeroBlock"
+		# Показываем, что именно убрали: вдруг это был осознанный split-DNS.
+		N=0
+		for s in $DROPLIST; do
+			N=$((N + 1))
+			[ "$N" -le 8 ] && info "  $s"
+		done
+		[ "$DROPPED" -gt 8 ] && info "  ... и ещё $((DROPPED - 8))"
+		info "всё это есть в бэкапе; чтобы не трогать — ZB_SKIP_DNS_CLEANUP=1"
 	else
 		info "лишних переопределений не найдено"
 	fi
@@ -1066,6 +1079,70 @@ restore_missing_sections() {
 	if [ "$RESTORED" -gt 0 ]; then
 		/etc/init.d/zeroblock start >/dev/null 2>&1
 		sleep 20
+	fi
+}
+
+# ------------------------------------------------------------ ШАГ 7-бис --
+# Секции из комплекта.
+#
+# Автонастройка создаёт только canonical-секции awg10 и opera. Секции для
+# мессенджеров среди них нет — ни в дефолтах пакета, ни на сервере. Без неё
+# community-списки messengers и meta назначать некуда, и Telegram, Instagram
+# и WhatsApp остаются без маршрутизации вообще.
+
+ensure_bundled_sections() {
+	step "Секции из комплекта"
+
+	if [ "$ZB_KEEP_CONFIG" = "1" ]; then
+		info "пропущено (ZB_KEEP_CONFIG=1)"
+		return 0
+	fi
+	if [ ! -d "$SCRIPT_DIR/sections" ]; then
+		info "каталог sections/ не найден"
+		return 0
+	fi
+
+	ADDED=0
+	for f in "$SCRIPT_DIR"/sections/*.conf; do
+		[ -f "$f" ] || continue
+		name=$(basename "$f" .conf)
+
+		if section_exists "$name"; then
+			info "$name — уже есть"
+			continue
+		fi
+
+		# Секция может ссылаться на VPN-интерфейс, который поднимает
+		# автонастройка. Если его нет, добавлять бессмысленно.
+		NEEDIF=$(awk 'BEGIN{q=sprintf("%c",39)}
+			/^[ \t]*option[ \t]+interface[ \t]/{ v=$3; gsub(q,"",v); print v; exit }' "$f")
+		if [ -n "$NEEDIF" ] && [ ! -e "/sys/class/net/$NEEDIF" ]; then
+			warn "$name пропущена: интерфейс $NEEDIF не поднят"
+			continue
+		fi
+
+		/etc/init.d/zeroblock stop >/dev/null 2>&1
+		cp /etc/config/zeroblock /tmp/zb_pre_section.conf 2>/dev/null || {
+			warn "$name: не смог подстраховаться копией конфига, пропускаю"
+			continue
+		}
+		printf "\n" >>/etc/config/zeroblock
+		cat "$f" >>/etc/config/zeroblock
+
+		if uci show zeroblock >/dev/null 2>&1; then
+			ok "$name добавлена из комплекта${NEEDIF:+ (через $NEEDIF)}"
+			ADDED=$((ADDED + 1))
+		else
+			warn "$name сделала конфиг невалидным — откатываю"
+			cp /tmp/zb_pre_section.conf /etc/config/zeroblock 2>/dev/null
+		fi
+		rm -f /tmp/zb_pre_section.conf
+	done
+
+	if [ "$ADDED" -gt 0 ]; then
+		uci commit zeroblock
+		/etc/init.d/zeroblock start >/dev/null 2>&1
+		sleep 15
 	fi
 }
 
@@ -1399,6 +1476,7 @@ disable_legacy        # ломаем только после того, как з
 dns_temp_on
 write_config
 wait_autoconfig
+ensure_bundled_sections
 assign_community_lists
 install_lists
 install_excludes
