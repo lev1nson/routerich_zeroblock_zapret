@@ -19,7 +19,7 @@
 
 set -u
 
-VERSION="1.6.1"
+VERSION="1.7.0"
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="."
 LOG="/tmp/zeroblock-install.log"
 LOCK="/tmp/zb-install.lock"
@@ -66,6 +66,12 @@ CL_OPERA="video art geoblock games music shop porn socials news repo ai tools"
 
 # Секции, которым раздаём списки.
 SECTIONS="awg10 MESSENGERS opera"
+
+# При ZB_REMOTE_LISTS=1 списки подключаются по URL, и ZeroBlock обновляет их
+# сам по расписанию. Важно: его HTTP-клиент отрезает query-строку, поэтому
+# ссылки на API iplist (`?format=text&group=...`) не работают — годятся только
+# URL с путём, как raw.githubusercontent.
+LISTS_BASE_URL="${ZB_LISTS_URL:-https://raw.githubusercontent.com/lev1nson/routerich_zeroblock_zapret/main/lists}"
 
 # ------------------------------------------------------------------- ВЫВОД --
 
@@ -115,6 +121,7 @@ ZB_INSTALL_TG=$(flag "${ZB_INSTALL_TG:-0}")
 ZB_REMOVE_PODKOP=$(flag "${ZB_REMOVE_PODKOP:-0}")
 ZB_PREFER_REPO=$(flag "${ZB_PREFER_REPO:-0}")
 ZB_REINSTALL=$(flag "${ZB_REINSTALL:-0}")
+ZB_REMOTE_LISTS=$(flag "${ZB_REMOTE_LISTS:-0}")
 ZB_FORCE=$(flag "${ZB_FORCE:-0}")
 ZB_AUTOCONFIG_WAIT=$(num "${ZB_AUTOCONFIG_WAIT:-300}" 300)
 
@@ -1231,6 +1238,8 @@ install_lists() {
 		return 0
 	fi
 
+	[ "$ZB_REMOTE_LISTS" = "1" ] && info "режим удалённых списков: ZeroBlock будет обновлять их сам"
+
 	mkdir -p "$LIST_DIR"
 	COUNT=0
 	for sec in $SECTIONS; do
@@ -1240,11 +1249,21 @@ install_lists() {
 			info "$sec — секции нет, список пропущен"
 			continue
 		fi
+
+		# Файл кладём в любом случае: он же служит запасом, если удалённый
+		# список окажется недоступен.
 		tr -d '\r' <"$SRC" >"$LIST_DIR/zb-$sec.lst"
 		udel "zeroblock.$sec.user_lists"
-		uci add_list "zeroblock.$sec.user_lists=$LIST_DIR/zb-$sec.lst"
+
+		if [ "$ZB_REMOTE_LISTS" = "1" ]; then
+			uci add_list "zeroblock.$sec.user_lists=$LISTS_BASE_URL/zb-$sec.lst"
+			ok "$sec: $LISTS_BASE_URL/zb-$sec.lst"
+		else
+			uci add_list "zeroblock.$sec.user_lists=$LIST_DIR/zb-$sec.lst"
+			ok "$sec: $(wc -l <"$LIST_DIR/zb-$sec.lst") строк"
+		fi
+
 		uci set "zeroblock.$sec.enable_user_lists=1"
-		ok "$sec: $(wc -l <"$LIST_DIR/zb-$sec.lst") строк"
 		COUNT=$((COUNT + 1))
 	done
 

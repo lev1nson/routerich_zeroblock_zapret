@@ -123,6 +123,8 @@ ZB_SKIP_LISTS=1 sh install.sh
 | `ZB_KEEP_CONFIG` | `0` | Не трогать существующий конфиг, секции, списки и исключения |
 | `ZB_PREFER_REPO` | `0` | Ставить из фида роутера, игнорируя вложенные `.ipk` |
 | `ZB_REINSTALL` | `0` | Переустановить пакеты, даже если версия совпадает |
+| `ZB_REMOTE_LISTS` | `0` | Подключить списки по URL, чтобы ZeroBlock обновлял их сам |
+| `ZB_LISTS_URL` | GitHub этого репо | Свой источник для `ZB_REMOTE_LISTS` |
 | `ZB_INSTALL_TG` | `0` | Поставить `zeroblock-tg` — уведомления в Telegram |
 | `ZB_REMOVE_PODKOP` | `0` | Удалить podkop совсем, а не просто выключить |
 | `ZB_FORCE` | `0` | Продолжать при нехватке места, отсутствии nftables и sing-box |
@@ -161,6 +163,7 @@ sh uninstall.sh full    # полный: sysupgrade -r из последнего 
 │   ├── exclude-ips.txt           российские подсети — напрямую
 │   └── src/                      исходники в формате podkop/getIPList
 └── tools/
+    ├── fetch-lists.sh            скачать свежие выгрузки и пересобрать
     └── build-lists.py            пересборка списков из src/
 ```
 
@@ -169,18 +172,39 @@ sh uninstall.sh full    # полный: sysupgrade -r из последнего 
 Три разных источника, их важно не путать:
 
 1. **Community-списки ZeroBlock** — приходят с сервера RouteRich и обновляются сами. `youtube`, `discord`, `meta`, `messengers`, `torrent`, `ai`, `tools` и прочие. Скрипт только раскладывает их по секциям.
-2. **Списки из этого репозитория** — `lists/*.lst`, собраны из выгрузок [iplist.my-handbook.ru](https://iplist.my-handbook.ru/ru) (зарубежные ресурсы) и [ru-iplist.my-handbook.ru](https://ru-iplist.my-handbook.ru/ru) (российские). Формат podkop/getIPList. **Статичны, сами не обновляются.**
+2. **Списки из этого репозитория** — `lists/*.lst`, собраны из выгрузок [iplist.my-handbook.ru](https://iplist.my-handbook.ru/ru) (зарубежные ресурсы) и [ru-iplist.my-handbook.ru](https://ru-iplist.my-handbook.ru/ru) (российские). Оба — инстансы проекта [rekryt/iplist](https://github.com/rekryt/iplist). Обновляются командой `sh tools/fetch-lists.sh`.
 3. **Исключения** — из того же ru-iplist: банки, госуслуги, налоговая, Яндекс. Идут напрямую мимо прокси.
 
 Исходные JSON лежат в `lists/src/`, готовые списки — обычный текст, открываются и читаются глазами.
 
-### Пересборка списков
+### Обновление списков
 
-Скачайте свежие выгрузки с сайтов выше в `lists/src/` и пересоберите:
+Одной командой — скачивает свежие выгрузки и пересобирает:
+
+```sh
+sh tools/fetch-lists.sh
+git diff --stat lists/    # посмотреть, что изменилось
+```
+
+Скрипт не тронет рабочие списки, если источник не ответил или прислал мусор. Запускать на своей машине, не на роутере: результат коммитится в репозиторий.
+
+Пересобрать из уже скачанных JSON, без сети:
 
 ```sh
 python3 tools/build-lists.py
 ```
+
+### Чтобы ZeroBlock обновлял списки сам
+
+```sh
+ZB_REMOTE_LISTS=1 sh install.sh
+```
+
+Тогда в `user_lists` пропишутся URL из этого репозитория, и ZeroBlock будет перекачивать их по своему расписанию (`update_interval`, по умолчанию раз в сутки). Файлы всё равно кладутся на диск — как запас, если GitHub окажется недоступен.
+
+Свой источник: `ZB_LISTS_URL=https://example.com/lists`.
+
+**Важно про URL.** HTTP-клиент ZeroBlock отрезает query-строку — проверено на живом роутере: `https://iplist.my-handbook.ru/?format=text&group=messengers` он запрашивает как `https://iplist.my-handbook.ru/` и получает HTML вместо списка. Поэтому подключать API iplist напрямую нельзя, годятся только URL с путём вроде `raw.githubusercontent.com`.
 
 Конвертер раскладывает сервисы по секциям согласно полю `group`, схлопывает подсети, выбрасывает одиночные IP, уже покрытые CIDR-ами, и отбрасывает IPv6 (на роутере он выключен). Раскладку групп можно поменять в `SECTION_GROUPS` в начале файла.
 
