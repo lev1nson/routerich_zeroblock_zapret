@@ -32,12 +32,13 @@ from pathlib import Path
 SECTION_GROUPS = {
     "awg10": {
         "anime", "block", "discord", "googleplay", "torrent", "youtube", "cdn",
+        "porn",
     },
     "MESSENGERS": {
         "messengers", "meta",
     },
     "opera": {
-        "video", "art", "geoblock", "games", "music", "shop", "porn",
+        "video", "art", "geoblock", "games", "music", "shop",
         "socials", "news", "repo", "ai", "tools",
     },
 }

@@ -19,7 +19,7 @@
 
 set -u
 
-VERSION="1.9.0"
+VERSION="1.9.1"
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="."
 LOG="/tmp/zeroblock-install.log"
 LOCK="/tmp/zb-install.lock"
@@ -60,9 +60,9 @@ LEGACY_SERVICES="podkop podkop-plus zapret zapret-ng nikita byedpi youtubeUnbloc
 ZB_DNS_PORT="5359"
 
 # Community-списки по секциям. ZeroBlock сам разрулит пересечения.
-CL_AWG10="anime block discord googleplay torrent youtube"
+CL_AWG10="anime block discord googleplay torrent youtube porn"
 CL_MESSENGERS="messengers meta"
-CL_OPERA="video art geoblock games music shop porn socials news repo ai tools"
+CL_OPERA="video art geoblock games music shop socials news repo ai tools"
 
 # Секции, которым раздаём списки.
 SECTIONS="awg10 MESSENGERS opera"

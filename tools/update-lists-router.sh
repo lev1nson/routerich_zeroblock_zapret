@@ -26,9 +26,9 @@ URL_FOREIGN="${ZB_URL_FOREIGN:-https://iplist.my-handbook.ru}"
 URL_RU="${ZB_URL_RU:-https://ru-iplist.my-handbook.ru}"
 
 # Раскладка групп по секциям — та же, что в tools/build-lists.py.
-G_AWG10="anime block discord googleplay torrent youtube cdn"
+G_AWG10="anime block discord googleplay torrent youtube cdn porn"
 G_MESSENGERS="messengers meta"
-G_OPERA="video art geoblock games music shop porn socials news repo ai tools"
+G_OPERA="video art geoblock games music shop socials news repo ai tools"
 
 # Если свежий список внезапно вдвое короче прежнего, это почти наверняка
 # обрезанный ответ, а не реальное изменение. Такое не применяем.
