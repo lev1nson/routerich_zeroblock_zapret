@@ -19,7 +19,7 @@
 
 set -u
 
-VERSION="1.8.0"
+VERSION="1.9.0"
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="."
 LOG="/tmp/zeroblock-install.log"
 LOCK="/tmp/zb-install.lock"
@@ -121,6 +121,7 @@ ZB_INSTALL_TG=$(flag "${ZB_INSTALL_TG:-0}")
 ZB_REMOVE_PODKOP=$(flag "${ZB_REMOVE_PODKOP:-0}")
 ZB_PREFER_REPO=$(flag "${ZB_PREFER_REPO:-0}")
 ZB_REINSTALL=$(flag "${ZB_REINSTALL:-0}")
+ZB_VERSION="${ZB_VERSION:-}"
 ZB_REMOTE_LISTS=$(flag "${ZB_REMOTE_LISTS:-0}")
 ZB_CRON_UPDATE=$(flag "${ZB_CRON_UPDATE:-0}")
 ZB_FORCE=$(flag "${ZB_FORCE:-0}")
@@ -463,21 +464,98 @@ check_engine() {
 	warn "движка нет, продолжаю из-за ZB_FORCE=1 — работать не будет"
 }
 
+# Версия из имени файла: zeroblock_0.8.4-r280_aarch64_cortex-a53.ipk → 0.8.4-r280
+ipk_version() {
+	_b=$(basename "$1")
+	_b=${_b#*_}          # отрезаем имя пакета
+	echo "${_b%%_*}"     # и всё начиная с архитектуры
+}
+
+# Из нескольких .ipk выбирает нужный: с версией $ZB_VERSION, если она задана,
+# иначе самый новый. Обычный `ls | head -1` сортирует по алфавиту, из-за чего
+# 0.9.0-r1 проигрывает 0.8.4-r280 — то есть выбирается не то, что думаешь.
+pick_ipk() {
+	_pat="$1"
+	_best=""; _bestver=""
+
+	for _f in $_pat; do
+		[ -f "$_f" ] || continue
+		_v=$(ipk_version "$_f")
+
+		if [ -n "$ZB_VERSION" ]; then
+			[ "$_v" = "$ZB_VERSION" ] && { echo "$_f"; return 0; }
+			continue
+		fi
+
+		if [ -z "$_best" ] || opkg compare-versions "$_v" ">>" "$_bestver" 2>/dev/null; then
+			_best="$_f"; _bestver="$_v"
+		fi
+	done
+
+	[ -n "$_best" ] && echo "$_best"
+}
+
+# Базовый URL фида routerich из настроек opkg — оттуда можно забрать
+# конкретную версию по прямой ссылке. Сам opkg install pkg=version не умеет.
+feed_base() {
+	grep -hoE 'https?://[^ ]+/routerich' /etc/opkg/*.conf /etc/opkg/*.list 2>/dev/null | head -1
+}
+
+# Скачивает конкретную версию из фида, если её нет во вложенных пакетах.
+fetch_ipk_version() {
+	_name="$1"; _ver="$2"; _arch="$3"
+	_base=$(feed_base)
+	[ -n "$_base" ] || return 1
+
+	_file="${_name}_${_ver}_${_arch}.ipk"
+	_dst="/tmp/zb-pkg-$_file"
+	if curl -fsSL --max-time 120 -o "$_dst" "$_base/$_file" 2>/dev/null && [ -s "$_dst" ]; then
+		echo "$_dst"
+		return 0
+	fi
+	rm -f "$_dst"
+	return 1
+}
+
 # Решает, откуда брать ZeroBlock: вложенный файл или фиды роутера.
 resolve_packages() {
 	ZB_IPK=""; LUCI_IPK=""; TG_IPK=""; SOURCE=""
 
+	[ -n "$ZB_VERSION" ] && info "запрошена версия: $ZB_VERSION"
+
 	# Вложенные .ipk годятся только для opkg и только при совпадении арки.
 	if [ "$PKGM" = "opkg" ] && [ "$ZB_PREFER_REPO" != "1" ] && [ -d "$SCRIPT_DIR/packages" ]; then
-		ZB_IPK=$(ls "$SCRIPT_DIR"/packages/zeroblock_*_"$ARCH".ipk 2>/dev/null | head -1)
-		LUCI_IPK=$(ls "$SCRIPT_DIR"/packages/luci-app-zeroblock_*_all.ipk 2>/dev/null | head -1)
-		TG_IPK=$(ls "$SCRIPT_DIR"/packages/zeroblock-tg_*_"$ARCH".ipk 2>/dev/null | head -1)
+		ZB_IPK=$(pick_ipk "$SCRIPT_DIR/packages/zeroblock_*_$ARCH.ipk")
+		TG_IPK=$(pick_ipk "$SCRIPT_DIR/packages/zeroblock-tg_*_$ARCH.ipk")
+
+		# luci-app берём той же версии, что и сам zeroblock, — иначе
+		# веб-интерфейс может не совпасть с бэкендом по схеме конфига.
+		if [ -n "$ZB_IPK" ]; then
+			_zv=$(ipk_version "$ZB_IPK")
+			LUCI_IPK=$(ZB_VERSION="$_zv" pick_ipk "$SCRIPT_DIR/packages/luci-app-zeroblock_*_all.ipk")
+			[ -n "$LUCI_IPK" ] || LUCI_IPK=$(ZB_VERSION="" pick_ipk "$SCRIPT_DIR/packages/luci-app-zeroblock_*_all.ipk")
+		fi
+
+		# Версия задана, но такого файла нет — пробуем забрать из фида.
+		if [ -z "$ZB_IPK" ] && [ -n "$ZB_VERSION" ]; then
+			info "версии $ZB_VERSION нет во вложенных пакетах, ищу в фиде"
+			pkg_update >/dev/null 2>&1 || true
+			ZB_IPK=$(fetch_ipk_version zeroblock "$ZB_VERSION" "$ARCH") &&
+				ok "скачал zeroblock $ZB_VERSION из фида"
+			LUCI_IPK=$(fetch_ipk_version luci-app-zeroblock "$ZB_VERSION" all) || LUCI_IPK=""
+		fi
 	fi
 
 	if [ -n "$ZB_IPK" ] && [ -n "$LUCI_IPK" ]; then
 		SOURCE="file"
-		ok "источник: вложенный пакет $(basename "$ZB_IPK")"
+		ok "источник:  файл, zeroblock $(ipk_version "$ZB_IPK") / luci $(ipk_version "$LUCI_IPK")"
+		_n=$(ls "$SCRIPT_DIR"/packages/zeroblock_*_"$ARCH".ipk 2>/dev/null | wc -l)
+		[ "$_n" -gt 1 ] && info "в packages/ версий: $_n, выбрана $(ipk_version "$ZB_IPK")"
 		return 0
+	fi
+
+	if [ -n "$ZB_VERSION" ] && [ "$ZB_PREFER_REPO" != "1" ]; then
+		die "версия $ZB_VERSION недоступна: ни в packages/, ни в фиде"
 	fi
 
 	# Иначе — фиды роутера. Индекс мог ни разу не обновляться.
@@ -646,6 +724,17 @@ install_packages() {
 			pkg_install_repo zeroblock-tg && ok "zeroblock-tg (уведомления в Telegram)" ||
 				warn "zeroblock-tg недоступен"
 		fi
+	fi
+
+	# Фиксируем, что именно встало: пригодится, чтобы воспроизвести
+	# конфигурацию или откатиться на конкретную версию.
+	if [ -n "${BACKUP_DIR:-}" ]; then
+		{
+			echo "# установлено $(date)"
+			for _p in zeroblock luci-app-zeroblock zeroblock-tg zapret2 opera-proxy sing-box-tiny sing-box-rr sing-box; do
+				_v=$(pkg_version "$_p"); [ -n "$_v" ] && echo "$_p=$_v"
+			done
+		} >"$BACKUP_DIR/versions.txt" 2>/dev/null
 	fi
 
 	pkg_installed zeroblock || die "zeroblock не появился в списке установленных"
